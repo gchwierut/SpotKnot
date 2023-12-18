@@ -7,6 +7,7 @@ import re
 import os
 import threading
 import time
+
 track_counts = {}
 
 # Load client IDs and secrets from ids.csv
@@ -26,12 +27,20 @@ def get_user_queries():
     query_list = [query.strip().lower() for query in queries.split(',')]
     return query_list
 
-# Function to process playlists
-def process_playlist(which, total, item, all_tracks, playlist_progress, track_counts, user_id, query):
+# Function to get the release year range from the user
+def get_release_year_range():
+    release_year_range = input("Enter the release year range (e.g., 1915-2018), or press Enter to skip: ")
+    if release_year_range:
+        start_year, end_year = map(int, release_year_range.split('-'))
+        return start_year, end_year
+    else:
+        return None, None  # Return None if no range is provided
+
+def process_playlist(which, total, item, all_tracks, playlist_progress, track_counts, user_id, query, start_year, end_year):
     playlist_id = item['id']
     playlist_name = item['name']
     if playlist_id not in playlist_progress:
-        playlist_progress[playlist_id] = {'offset': 0}
+        playlist_progress[playlist_id] = {'offset': 0, 'track_info': []}
 
     # Check if the query is an exact word match in the playlist name, case-insensitive
     if re.search(rf'\b{re.escape(query.lower())}\b', playlist_name.lower(), re.IGNORECASE):
@@ -51,19 +60,40 @@ def process_playlist(which, total, item, all_tracks, playlist_progress, track_co
                 if track:
                     artist_name = track['artists'][0]['name']
                     track_name = track['name']
+                    if track.get('album') and track['album'].get('release_date') is not None:
+                        release_year = track['album']['release_date'].split('-')[0]
+                    else:
+                        release_year = 'Unknown'
+
+                    # Convert 'Unknown' to 0
+                    release_year = 0 if release_year == 'Unknown' else int(release_year)
+
+
                     query = f'artist:{artist_name} track:{track_name.split(" - ")[0]}'
                     print(f"Processing {playlist_name}: {artist_name} - {track_name} ({which}/{total})")
-                    if query not in all_tracks:
-                        all_tracks.add(query) if isinstance(all_tracks, set) else all_tracks.append(query)
+
+                    # Save track information in progress JSON
+                    track_info = {'artist': artist_name, 'track_name': track_name, 'release_year': release_year, 'track_id': track['id']}
+                    playlist_progress[playlist_id]['track_info'].append(track_info)
+
+                    # Track counts for all tracks, even those beyond the year range
                     track_counts[query] = track_counts.get(query, 0) + 1
+
+                    if (start_year is None or int(start_year) <= int(release_year)) and (end_year is None or int(release_year) <= int(end_year)):
+                        if query not in all_tracks:
+                            all_tracks.add(query) if isinstance(all_tracks, set) else all_tracks.append(query)
 
             if tracks['next']:
                 playlist_progress[playlist_id]['offset'] += len(tracks['items'])
             else:
                 break
-# Introduce a time delay to avoid hitting API limits
+            # Introduce a time delay to avoid hitting API limits
             time.sleep(1)  # Sleep for 1 second
         playlist_progress[playlist_id]['offset'] = 0
+
+
+
+
 
 
 # Function to save progress
@@ -74,7 +104,6 @@ def save_progress(data, filename):
         data['all_tracks'] = []
     with open(filename, 'w', encoding='utf-8') as f:  # Specify utf-8 encoding
         json.dump(data, f, ensure_ascii=False, indent=4)  # Set ensure_ascii to False to handle non-ASCII characters
-
 
 # Function to load progress
 def load_progress(filename):
@@ -98,9 +127,7 @@ def load_progress(filename):
             'playlist_progress': {},
         }
 
-
-# Modify the create_playlist function to use batch creation
-def create_playlist(track_counts_all_queries, query_list, threshold):
+def create_playlist(track_counts_all_queries, query_list, threshold, start_year, end_year):
     combined_track_counts = {}
     all_tracks = set()  # Store all tracks from all queries
 
@@ -113,9 +140,10 @@ def create_playlist(track_counts_all_queries, query_list, threshold):
     # Apply the threshold to all tracks
     filtered_tracks = {query: count for query, count in combined_track_counts.items() if count >= threshold}
 
-    sorted_tracks = sorted(filtered_tracks.keys(), key=lambda x: filtered_tracks[x], reverse=True)
+    if filtered_tracks:
+        # Sort tracks by count in descending order
+        sorted_tracks = sorted(filtered_tracks.items(), key=lambda x: x[1], reverse=True)
 
-    if sorted_tracks:
         user_id = sp.current_user()['id']
         playlist_name = "generated: " + ", ".join(query_list)
         new_playlist = sp.user_playlist_create(user_id, playlist_name, public=False)
@@ -128,10 +156,13 @@ def create_playlist(track_counts_all_queries, query_list, threshold):
             batch_queries = sorted_tracks[i:i + batch_size]
 
             tracks_to_add = []
-            for query in batch_queries:
+            for query, _ in batch_queries:
                 track_name = query.split(" track:")[1]
                 artist_name = query.split(" track:")[0].split("artist:")[1]
                 new_query = f'artist:{artist_name} track:{track_name.split(" - ")[0]}'
+
+                if start_year and end_year:
+                    new_query += f' year:{start_year}-{end_year}'
 
                 search_results = sp.search(q=new_query, type='track', limit=1)
                 track_items = search_results['tracks']['items']
@@ -158,11 +189,6 @@ def create_playlist(track_counts_all_queries, query_list, threshold):
 
 
 
-
-
-
-
-
 # Start the main program
 if __name__ == "__main__":
     try:
@@ -175,6 +201,8 @@ if __name__ == "__main__":
                                                        client_secret=client_credentials[0]['client_secret'],
                                                        redirect_uri="http://localhost:8000/callback/",
                                                        scope="playlist-modify-private"))
+        start_year, end_year = get_release_year_range()
+
         for query in queries:
             current_state = load_progress(f'progress_{sp.current_user()["id"]}_{query}.json')
 
@@ -193,7 +221,7 @@ if __name__ == "__main__":
             playlist_id = None
             limit = 50
 
-            max_playlists_per_query = 100000 // len(queries)  # Divide max playlists by the number of queries
+            max_playlists_per_query = 800 // len(queries)  # Divide max playlists by the number of queries
             unique_processed_playlists_count = 0
 
             while True:
@@ -213,15 +241,15 @@ if __name__ == "__main__":
                         if item['owner']['id'] != sp.current_user()['id']:
                             playlist_id = item['id']
                             if playlist_id not in current_state['processed_playlists']:
-                                process_playlist(len(current_state['processed_playlists']) + 1, total, item, current_state['all_tracks'], current_state['playlist_progress'], current_state['track_counts'], sp.current_user()["id"], query)
+                                process_playlist(len(current_state['processed_playlists']) + 1, total, item, current_state['all_tracks'], current_state['playlist_progress'], current_state['track_counts'], sp.current_user()["id"], query, start_year, end_year)
                                 current_state['processed_playlists'].append(playlist_id)
                                 unique_processed_playlists_count += 1
-                                save_progress(current_state, f'progress_{sp.current_user()["id"]}_{query}.json')
+                                save_progress(current_state, f'progress_{sp.current_user()["id"]}_{query}.json')  # Save progress after each playlist
                             current_state['which'] += 1
 
                     if playlist['next']:
                         current_state['playlist_progress'][playlist_id]['offset'] += limit
-                        save_progress(current_state, f'progress_{sp.current_user()["id"]}_{query}.json')
+                        save_progress(current_state, f'progress_{sp.current_user()["id"]}_{query}.json')  # Save progress after each offset update
                     else:
                         break
                 except requests.exceptions.ReadTimeout:
@@ -244,7 +272,7 @@ if __name__ == "__main__":
                         print(f"HTTP Error {e.http_status} occurred. Exiting...")
                         break
 
-            track_counts_all_queries.append(current_state['track_counts'])
+        track_counts_all_queries.append(current_state['track_counts'])
 
         # Count all the tracks from the queries
         all_tracks_counts = {}
@@ -256,7 +284,7 @@ if __name__ == "__main__":
         for query, count in all_tracks_counts.items():
             print(f"{query}: {count} tracks")
 
-        create_playlist(track_counts_all_queries, queries, threshold)
+        create_playlist(track_counts_all_queries, queries, threshold, start_year, end_year)
 
     except Exception as e:
         print(f"An error occurred: {str(e)}")
