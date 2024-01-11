@@ -1,3 +1,4 @@
+# Importing necessary libraries
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import json
@@ -7,8 +8,13 @@ import re
 import os
 import threading
 import time
+import random
+import tempfile
+import shutil
 
+# Global variables
 track_counts = {}
+mutex = threading.Lock()
 
 # Load client IDs and secrets from ids.csv
 client_credentials = []
@@ -36,7 +42,8 @@ def get_release_year_range():
     else:
         return None, None  # Return None if no range is provided
 
-def process_playlist(which, total, item, all_tracks, playlist_progress, track_counts, user_id, query, start_year, end_year):
+# Function to process a playlist
+def process_playlist(which, total, item, all_tracks, playlist_progress, track_counts, user_id, query, start_year, end_year, sp):
     playlist_id = item['id']
     playlist_name = item['name']
     if playlist_id not in playlist_progress:
@@ -48,62 +55,121 @@ def process_playlist(which, total, item, all_tracks, playlist_progress, track_co
             offset = playlist_progress[playlist_id]['offset']
             try:
                 tracks = sp.playlist_tracks(playlist_id, offset=offset)
+                time.sleep(3)
             except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 400 and "Error parsing JSON" in str(e):
-                    print(f"Error parsing JSON for {playlist_name}, skipping this playlist.")
+                if e.response.status_code == 400 and "Bad request" in str(e):
+                    print(f"Bad request for {playlist_name}, skipping this playlist.")
                     break  # Skip this playlist and continue with the next one
                 else:
-                    raise  # Re-raise the exception if it's not the expected error
+                    print(f"HTTP Error {e.response.status_code} occurred for {playlist_name}. Waiting and retrying.")
+                    time.sleep(10)  # Sleep for 10 seconds before retrying
+                    continue
+            except Exception as e:
+                print(f"An error occurred for {playlist_name}: {str(e)}. Retrying...")
+                time.sleep(10)  # Sleep for 10 seconds before retrying
+                continue
 
             for item in tracks['items']:
-                track = item['track']
-                if track:
-                    artist_name = track['artists'][0]['name']
-                    track_name = track['name']
-                    if track.get('album') and track['album'].get('release_date') is not None:
-                        release_year = track['album']['release_date'].split('-')[0]
+                try:
+                    track = item['track']
+                    if track:
+                        artist_name = track['artists'][0]['name']
+                        track_name = track['name']
+                        if track.get('album') and track['album'].get('release_date') is not None:
+                            release_date = track['album']['release_date']
+                            release_year = release_date[:4] if release_date else 0
+                        else:
+                            release_year = 0
+
+                        # Exclude year range from the query
+                        query = f'artist:"{artist_name}" track:{track_name.split("-")[0]}'
+
+                        print(f"Processing {playlist_name}: {artist_name} - {track_name} ({which}/{total})")
+
+                        # Save track information in progress JSON
+                        track_info = {
+                            'artist': artist_name,
+                            'track_name': track_name,
+                            'release_year': release_year,
+                            'release_date': release_date,  # Added release_date
+                            'track_id': track['id']
+                        }
+
+                        # Check if the track is already in the playlist progress
+                        existing_track_info = next((t for t in playlist_progress[playlist_id]['track_info'] if t['artist'] == artist_name and t['track_name'] == track_name), None)
+                        if existing_track_info:
+                            # Update release year if the current track has an earlier release date
+                            existing_release_date = existing_track_info['release_date']
+                            if existing_release_date and release_date and existing_release_date > release_date:
+                                existing_track_info['release_year'] = release_date[:4]
+
+                        with mutex:
+                            playlist_progress[playlist_id]['track_info'].append(track_info)
+
+                        # Track counts for all tracks, even those beyond the year range
+                        with mutex:
+                            # Exclude year range from the key when updating track counts
+                            track_counts[query] = track_counts.get(query, 0) + 1
+
+                        if (start_year is None or int(start_year) <= int(release_year)) and (end_year is None or int(release_year) <= int(end_year)):
+                            with mutex:
+                                if query not in all_tracks:
+                                    all_tracks.add(query) if isinstance(all_tracks, set) else all_tracks.append(query)
+
+                except UnicodeEncodeError as e:
+                    print(f"UnicodeEncodeError occurred for {artist_name} - {track_name}. Skipping this track.")
+                    continue  # Skip to the next iteration
+                except requests.exceptions.HTTPError as e:
+                    if e.response.status_code == 400 and "Bad request" in str(e):
+                        print(f"Bad request for {playlist_name}, skipping this track.")
+                        continue  # Skip this track and continue with the next one
                     else:
-                        release_year = 'Unknown'
-
-                    # Convert 'Unknown' to 0
-                    release_year = 0 if release_year == 'Unknown' else int(release_year)
-
-
-                    query = f'artist:{artist_name} track:{track_name.split(" - ")[0]}'
-                    print(f"Processing {playlist_name}: {artist_name} - {track_name} ({which}/{total})")
-
-                    # Save track information in progress JSON
-                    track_info = {'artist': artist_name, 'track_name': track_name, 'release_year': release_year, 'track_id': track['id']}
-                    playlist_progress[playlist_id]['track_info'].append(track_info)
-
-                    # Track counts for all tracks, even those beyond the year range
-                    track_counts[query] = track_counts.get(query, 0) + 1
-
-                    if (start_year is None or int(start_year) <= int(release_year)) and (end_year is None or int(release_year) <= int(end_year)):
-                        if query not in all_tracks:
-                            all_tracks.add(query) if isinstance(all_tracks, set) else all_tracks.append(query)
+                        print(f"HTTP Error {e.response.status_code} occurred for {playlist_name}. Waiting and retrying.")
+                        time.sleep(10)  # Sleep for 10 seconds before retrying
+                        continue
+                except Exception as e:
+                    print(f"An error occurred while processing {artist_name} - {track_name}: {str(e)}. Skipping this track.")
+                    continue  # Skip to the next iteration
 
             if tracks['next']:
-                playlist_progress[playlist_id]['offset'] += len(tracks['items'])
+                with mutex:
+                    playlist_progress[playlist_id]['offset'] += len(tracks['items'])
             else:
                 break
             # Introduce a time delay to avoid hitting API limits
-            time.sleep(1)  # Sleep for 1 second
-        playlist_progress[playlist_id]['offset'] = 0
-
-
-
-
-
+            time.sleep(3)  # Sleep for 1 second
+        with mutex:
+            playlist_progress[playlist_id]['offset'] = 0
 
 # Function to save progress
 def save_progress(data, filename):
+    temp_filename = f"{filename}.tmp"
     if 'all_tracks' in data:
         data['all_tracks'] = list(data['all_tracks'])
     else:
         data['all_tracks'] = []
-    with open(filename, 'w', encoding='utf-8') as f:  # Specify utf-8 encoding
-        json.dump(data, f, ensure_ascii=False, indent=4)  # Set ensure_ascii to False to handle non-ASCII characters
+    
+    max_retries = 3  # Define maximum number of retries
+    retry_count = 0
+
+    while retry_count < max_retries:
+        try:
+            with open(temp_filename, 'w', encoding='utf-8') as f:  
+                json.dump(data, f, ensure_ascii=False, indent=4)  
+
+            # Use shutil.move to ensure atomicity
+            shutil.move(temp_filename, filename)
+            break  # Break the loop if successful
+
+        except PermissionError as e:
+            retry_count += 1
+            print(f"Permission denied error: {str(e)}. Retrying ({retry_count}/{max_retries})...")
+            time.sleep(5)  # Wait for a few seconds before retrying
+            continue
+
+        except Exception as e:
+            print(f"An error occurred: {str(e)}")
+            break  # Break the loop for other types of errors
 
 # Function to load progress
 def load_progress(filename):
@@ -127,7 +193,8 @@ def load_progress(filename):
             'playlist_progress': {},
         }
 
-def create_playlist(track_counts_all_queries, query_list, threshold, start_year, end_year):
+# Function to create a playlist based on track counts
+def create_playlist(track_counts_all_queries, query_list, threshold, start_year, end_year, sp):
     combined_track_counts = {}
     all_tracks = set()  # Store all tracks from all queries
 
@@ -137,57 +204,66 @@ def create_playlist(track_counts_all_queries, query_list, threshold, start_year,
             combined_track_counts[query] = combined_track_counts.get(query, 0) + count
             all_tracks.add(query)
 
+    # Sort tracks by count in descending order globally
+    sorted_tracks = sorted(combined_track_counts.items(), key=lambda x: x[1], reverse=True)
+
     # Apply the threshold to all tracks
     filtered_tracks = {query: count for query, count in combined_track_counts.items() if count >= threshold}
 
     if filtered_tracks:
-        # Sort tracks by count in descending order
-        sorted_tracks = sorted(filtered_tracks.items(), key=lambda x: x[1], reverse=True)
-
         user_id = sp.current_user()['id']
         playlist_name = "generated: " + ", ".join(query_list)
         new_playlist = sp.user_playlist_create(user_id, playlist_name, public=False)
         new_playlist_id = new_playlist['id']
 
         added_track_ids = set()
+        # Set the batch size
         batch_size = 100
 
-        for i in range(0, len(sorted_tracks), batch_size):
-            batch_queries = sorted_tracks[i:i + batch_size]
-
-            tracks_to_add = []
-            for query, _ in batch_queries:
+        # Add tracks in batches of 100
+        tracks_to_add = []
+        for query, count in sorted_tracks:
+            if query in filtered_tracks:
                 track_name = query.split(" track:")[1]
                 artist_name = query.split(" track:")[0].split("artist:")[1]
-                new_query = f'artist:{artist_name} track:{track_name.split(" - ")[0]}'
 
-                if start_year and end_year:
-                    new_query += f' year:{start_year}-{end_year}'
+                try:
+                    search_results = sp.search(q=query, type='track', limit=1)
+                    track_items = search_results['tracks']['items']
 
-                search_results = sp.search(q=new_query, type='track', limit=1)
-                track_items = search_results['tracks']['items']
+                    if track_items:
+                        track = track_items[0]
+                        track_id = track['id']
 
-                if track_items:
-                    track = track_items[0]
-                    track_id = track['id']
+                        # Check if the track's release year is within the specified range
+                        release_year = int(track['album']['release_date'].split('-')[0])
+                        if (start_year is None or start_year <= release_year) and (end_year is None or release_year <= end_year):
 
-                    if track_id not in added_track_ids:
-                        added_track_ids.add(track_id)
-                        tracks_to_add.append(track_id)
+                            if track_id not in added_track_ids:
+                                added_track_ids.add(track_id)
+                                tracks_to_add.append(track_id)
 
-                        print(f"Added track to the playlist: {artist_name} - {track_name} ({len(added_track_ids)}/{len(sorted_tracks)})")
+                                print(f"Added track to the batch: {artist_name} - {track_name} ({release_year}) "
+                                      f"({len(added_track_ids)}/{len(filtered_tracks)}) - Count: {count}")
+                                print(f"Track ID: {track_id}")  # Print the track_id here
 
-            if tracks_to_add:
-                sp.playlist_add_items(new_playlist_id, tracks_to_add)
+                                if len(tracks_to_add) == batch_size:
+                                    sp.playlist_add_items(new_playlist_id, tracks_to_add)
+                                    print(f"Added a batch of {batch_size} tracks to the playlist")
+                                    tracks_to_add = []
 
-            print(f"Batch {i // batch_size + 1}/{len(sorted_tracks) // batch_size + 1} added to the playlist")
+                except Exception as e:
+                    # Handle exceptions as needed
+                    print(f"An error occurred: {str(e)}")
+
+        # Add the remaining tracks
+        if tracks_to_add:
+            sp.playlist_add_items(new_playlist_id, tracks_to_add)
+            print(f"Added a batch of {len(tracks_to_add)} tracks to the playlist")
 
         print(f"Playlist created: {new_playlist['external_urls']['spotify']}")
     else:
         print(f"No tracks meet the count threshold ({threshold} or more) to create a playlist.")
-
-
-
 
 # Start the main program
 if __name__ == "__main__":
@@ -221,7 +297,7 @@ if __name__ == "__main__":
             playlist_id = None
             limit = 50
 
-            max_playlists_per_query = 800 // len(queries)  # Divide max playlists by the number of queries
+            max_playlists_per_query = 850
             unique_processed_playlists_count = 0
 
             while True:
@@ -234,14 +310,14 @@ if __name__ == "__main__":
 
                 try:
                     results = sp.search(f'*{query}*', limit=limit, offset=current_state['playlist_progress'].get(playlist_id, {'offset': 0})['offset'], type='playlist')
-
+                    time.sleep(3)
                     playlist = results['playlists']
                     total = playlist['total']
                     for item in playlist['items']:
                         if item['owner']['id'] != sp.current_user()['id']:
                             playlist_id = item['id']
                             if playlist_id not in current_state['processed_playlists']:
-                                process_playlist(len(current_state['processed_playlists']) + 1, total, item, current_state['all_tracks'], current_state['playlist_progress'], current_state['track_counts'], sp.current_user()["id"], query, start_year, end_year)
+                                process_playlist(len(current_state['processed_playlists']) + 1, total, item, current_state['all_tracks'], current_state['playlist_progress'], current_state['track_counts'], sp.current_user()["id"], query, start_year, end_year, sp)
                                 current_state['processed_playlists'].append(playlist_id)
                                 unique_processed_playlists_count += 1
                                 save_progress(current_state, f'progress_{sp.current_user()["id"]}_{query}.json')  # Save progress after each playlist
@@ -254,23 +330,9 @@ if __name__ == "__main__":
                         break
                 except requests.exceptions.ReadTimeout:
                     print("Read timed out. Retrying...")
+                    time.sleep(10)
                     continue
-                except spotipy.exceptions.SpotifyException as e:
-                    if "HTTP Error 413" in str(e):
-                        print("HTTP Error 413 occurred. Exiting...")
-                        break
-                    elif e.http_status == 400 or e.http_status == 403:
-                        print(f"HTTP Error {e.http_status} occurred. Skipping the query.")
-                        break
-                    elif e.http_status == 404:
-                        print(f"HTTP Error {e.http_status} occurred. Playlist not found. Skipping the query.")
-                        break
-                    elif e.http_status == 429 or e.http_status == 500:
-                        print(f"HTTP Error {e.http_status} occurred. Waiting and retrying.")
-                        time.sleep(60)  # Sleep for 60 seconds before retrying
-                    else:
-                        print(f"HTTP Error {e.http_status} occurred. Exiting...")
-                        break
+
 
         track_counts_all_queries.append(current_state['track_counts'])
 
@@ -284,10 +346,11 @@ if __name__ == "__main__":
         for query, count in all_tracks_counts.items():
             print(f"{query}: {count} tracks")
 
-        create_playlist(track_counts_all_queries, queries, threshold, start_year, end_year)
+        create_playlist(track_counts_all_queries, queries, threshold, start_year, end_year, sp)
 
     except Exception as e:
         print(f"An error occurred: {str(e)}")
     finally:
         if os.path.exists('.cache'):
             os.remove('.cache')
+                   
