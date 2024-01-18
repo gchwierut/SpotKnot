@@ -1,4 +1,3 @@
-# Importing necessary libraries
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import json
@@ -12,7 +11,6 @@ import random
 import tempfile
 import shutil
 
-# Global variables
 track_counts = {}
 mutex = threading.Lock()
 
@@ -55,7 +53,7 @@ def process_playlist(which, total, item, all_tracks, playlist_progress, track_co
             offset = playlist_progress[playlist_id]['offset']
             try:
                 tracks = sp.playlist_tracks(playlist_id, offset=offset)
-                time.sleep(3)
+                time.sleep(4)
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 400 and "Bad request" in str(e):
                     print(f"Bad request for {playlist_name}, skipping this playlist.")
@@ -68,6 +66,7 @@ def process_playlist(which, total, item, all_tracks, playlist_progress, track_co
                 print(f"An error occurred for {playlist_name}: {str(e)}. Retrying...")
                 time.sleep(10)  # Sleep for 10 seconds before retrying
                 continue
+
 
             for item in tracks['items']:
                 try:
@@ -137,11 +136,13 @@ def process_playlist(which, total, item, all_tracks, playlist_progress, track_co
             else:
                 break
             # Introduce a time delay to avoid hitting API limits
-            time.sleep(3)  # Sleep for 1 second
+            time.sleep(4)  # Sleep for 1 second
         with mutex:
             playlist_progress[playlist_id]['offset'] = 0
 
-# Function to save progress
+
+
+
 def save_progress(data, filename):
     temp_filename = f"{filename}.tmp"
     if 'all_tracks' in data:
@@ -171,6 +172,7 @@ def save_progress(data, filename):
             print(f"An error occurred: {str(e)}")
             break  # Break the loop for other types of errors
 
+
 # Function to load progress
 def load_progress(filename):
     try:
@@ -193,7 +195,6 @@ def load_progress(filename):
             'playlist_progress': {},
         }
 
-# Function to create a playlist based on track counts
 def create_playlist(track_counts_all_queries, query_list, threshold, start_year, end_year, sp):
     combined_track_counts = {}
     all_tracks = set()  # Store all tracks from all queries
@@ -212,7 +213,15 @@ def create_playlist(track_counts_all_queries, query_list, threshold, start_year,
 
     if filtered_tracks:
         user_id = sp.current_user()['id']
-        playlist_name = "generated: " + ", ".join(query_list)
+
+        # Include years ranges and threshold in the playlist name
+        playlist_name = f"generated: {', '.join(query_list)}"
+
+        if start_year is not None and end_year is not None:
+            playlist_name += f" - {start_year}-{end_year}"
+
+        playlist_name += f" - Threshold {threshold}"
+
         new_playlist = sp.user_playlist_create(user_id, playlist_name, public=False)
         new_playlist_id = new_playlist['id']
 
@@ -265,11 +274,20 @@ def create_playlist(track_counts_all_queries, query_list, threshold, start_year,
     else:
         print(f"No tracks meet the count threshold ({threshold} or more) to create a playlist.")
 
+
+
+
+
+
+
 # Start the main program
 if __name__ == "__main__":
     try:
         queries = get_user_queries()
-        threshold = 3  # Set your desired threshold here
+        # Ask user for threshold
+        threshold_input = input("Enter the threshold value for track count (press Enter for default 3): ")
+        threshold = int(threshold_input) if threshold_input else 3
+
         track_counts_all_queries = []
 
         # Initialize track counts list
@@ -310,7 +328,7 @@ if __name__ == "__main__":
 
                 try:
                     results = sp.search(f'*{query}*', limit=limit, offset=current_state['playlist_progress'].get(playlist_id, {'offset': 0})['offset'], type='playlist')
-                    time.sleep(3)
+                    time.sleep(4)
                     playlist = results['playlists']
                     total = playlist['total']
                     for item in playlist['items']:
@@ -342,9 +360,20 @@ if __name__ == "__main__":
             for query, count in track_counts_query.items():
                 all_tracks_counts[query] = all_tracks_counts.get(query, 0) + count
 
-        # Print the counts
-        for query, count in all_tracks_counts.items():
-            print(f"{query}: {count} tracks")
+        # Load the track counts from the progress file
+        progress_filename = f'progress_{sp.current_user()["id"]}_{queries[0]}.json'
+        progress_data = load_progress(progress_filename)
+
+        if 'track_counts' in progress_data:
+            track_counts_from_file = progress_data['track_counts']
+
+            # Print the counts from the JSON file
+            for query, count in track_counts_from_file.items():
+                print(f"{query}: {count} tracks")
+
+        else:
+            print("No track counts found in the progress file.")
+
 
         create_playlist(track_counts_all_queries, queries, threshold, start_year, end_year, sp)
 
