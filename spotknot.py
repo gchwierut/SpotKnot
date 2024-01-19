@@ -218,9 +218,9 @@ def create_playlist(track_counts_all_queries, query_list, threshold, start_year,
         playlist_name = f"generated: {', '.join(query_list)}"
 
         if start_year is not None and end_year is not None:
-            playlist_name += f" - {start_year}-{end_year}"
+            playlist_name += f" [{start_year}-{end_year}]"
 
-        playlist_name += f" - Threshold {threshold}"
+        
 
         new_playlist = sp.user_playlist_create(user_id, playlist_name, public=False)
         new_playlist_id = new_playlist['id']
@@ -252,13 +252,14 @@ def create_playlist(track_counts_all_queries, query_list, threshold, start_year,
                                 added_track_ids.add(track_id)
                                 tracks_to_add.append(track_id)
 
-                                print(f"Added track to the batch: {artist_name} - {track_name} ({release_year}) "
+                                print(f"'{playlist_name}': {artist_name} - {track_name} ({release_year}) "
                                       f"({len(added_track_ids)}/{len(filtered_tracks)}) - Count: {count}")
-                                print(f"Track ID: {track_id}")  # Print the track_id here
+
+                                
 
                                 if len(tracks_to_add) == batch_size:
                                     sp.playlist_add_items(new_playlist_id, tracks_to_add)
-                                    print(f"Added a batch of {batch_size} tracks to the playlist")
+                                    
                                     tracks_to_add = []
 
                 except Exception as e:
@@ -287,7 +288,6 @@ if __name__ == "__main__":
         # Ask user for threshold
         threshold_input = input("Enter the threshold value for track count (press Enter for default 3): ")
         threshold = int(threshold_input) if threshold_input else 3
-
         track_counts_all_queries = []
 
         # Initialize track counts list
@@ -360,20 +360,9 @@ if __name__ == "__main__":
             for query, count in track_counts_query.items():
                 all_tracks_counts[query] = all_tracks_counts.get(query, 0) + count
 
-        # Load the track counts from the progress file
-        progress_filename = f'progress_{sp.current_user()["id"]}_{queries[0]}.json'
-        progress_data = load_progress(progress_filename)
-
-        if 'track_counts' in progress_data:
-            track_counts_from_file = progress_data['track_counts']
-
-            # Print the counts from the JSON file
-            for query, count in track_counts_from_file.items():
-                print(f"{query}: {count} tracks")
-
-        else:
-            print("No track counts found in the progress file.")
-
+        # Print the counts
+        for query, count in all_tracks_counts.items():
+            print(f"{query}: {count} tracks")
 
         create_playlist(track_counts_all_queries, queries, threshold, start_year, end_year, sp)
 
