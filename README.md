@@ -9,7 +9,7 @@ This Python script uses the Spotify API to generate playlists based on user-defi
 Make sure you have the following dependencies installed:
 
 ```bash
-pip install spotipy requests==2.26.0 && pip install json csv re threading time random os tempfile shutil
+pip install spotipy requests==2.26.0
 ```
 
 ### Getting Started 
