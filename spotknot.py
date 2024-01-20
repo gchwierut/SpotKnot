@@ -40,17 +40,21 @@ def get_release_year_range():
     else:
         return None, None  # Return None if no range is provided
 
-# Function to process a playlist
 def process_playlist(which, total, item, all_tracks, playlist_progress, track_counts, user_id, query, start_year, end_year, sp):
     playlist_id = item['id']
     playlist_name = item['name']
+    
     if playlist_id not in playlist_progress:
         playlist_progress[playlist_id] = {'offset': 0, 'track_info': []}
 
+    retry_count = 0  # Initialize the retry counter
+    max_retries = 3  # Set the maximum number of retries
+
     # Check if the query is an exact word match in the playlist name, case-insensitive
     if re.search(rf'\b{re.escape(query.lower())}\b', playlist_name.lower(), re.IGNORECASE):
-        while True:
+        while retry_count < max_retries:
             offset = playlist_progress[playlist_id]['offset']
+            
             try:
                 tracks = sp.playlist_tracks(playlist_id, offset=offset)
                 time.sleep(4)
@@ -60,10 +64,12 @@ def process_playlist(which, total, item, all_tracks, playlist_progress, track_co
                     break  # Skip this playlist and continue with the next one
                 else:
                     print(f"HTTP Error {e.response.status_code} occurred for {playlist_name}. Waiting and retrying.")
+                    retry_count += 1
                     time.sleep(10)  # Sleep for 10 seconds before retrying
                     continue
             except Exception as e:
                 print(f"An error occurred for {playlist_name}: {str(e)}. Retrying...")
+                retry_count += 1
                 time.sleep(10)  # Sleep for 10 seconds before retrying
                 continue
 
