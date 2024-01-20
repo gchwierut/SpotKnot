@@ -1,5 +1,3 @@
- Here is the text formatted in Markdown:
-
 # SpotKnot - Spotify PlaylistMiner
 
 ## Overview
