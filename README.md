@@ -1,4 +1,4 @@
-# SpotKnot - Spotify Playlist Miner
+# SpotKnot - Spotify Playlist Miner [DEPRECATED]
 
 ## Overview
 
