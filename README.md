@@ -14,11 +14,9 @@ pip install spotipy requests==2.26.0
 
 ### Getting Started 
 
-Obtain Spotify API credentials:
 
-1. Create a Spotify Developer account and create a new application to get your `client_id` and `client_secret`.
+Create a Spotify Developer account and create a new application to get your `client_id` and `client_secret`.
 
-2. Update the `ids.csv` file with your credentials.
 
 Run the script: 
 
